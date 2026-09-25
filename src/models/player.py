@@ -5,6 +5,33 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class UnderstatStats(BaseModel):
+    """Deep advanced underlying metrics scraped from Understat."""
+    understat_id: Optional[int] = None
+    player_name: str = ""
+    team_title: str = ""
+    minutes: int = 0
+    goals: int = 0
+    xG: float = 0.0
+    npxG: float = 0.0
+    assists: int = 0
+    xA: float = 0.0
+    xGChain: float = 0.0
+    xGBuildup: float = 0.0
+    shots: int = 0
+    key_passes: int = 0
+    # Per 90 metrics
+    npxG90: float = 0.0
+    xA90: float = 0.0
+    xG90: float = 0.0
+    xGChain90: float = 0.0
+    xGBuildup90: float = 0.0
+    shots90: float = 0.0
+    key_passes90: float = 0.0
+    # Over/under performance (finishing luck vs skill)
+    xg_delta: float = 0.0  # goals - xG
+
+
 class Player(BaseModel):
     """FPL Player Model representation."""
     id: int
@@ -33,6 +60,7 @@ class Player(BaseModel):
     status: str
     news: Optional[str] = None
     chance_of_playing_next_round: Optional[int] = None
+    understat: Optional[UnderstatStats] = None
 
 
 class PlayerSummary(BaseModel):

@@ -1,12 +1,13 @@
 """
 FPL Squad Analyzer & Predictive Scoring Engine.
 Evaluates upcoming gameweek fixtures, home/away advantage, fixture difficulty ratings (FDR),
-player form, xG/xA/xGI, and health status to compute Expected Points (xP), composite scores (0-100),
-and optimal starting XI / bench lineup recommendations.
+player form, xG/xA/xGI, Understat underlying metrics, and health status to compute Expected Points (xP),
+composite scores (0-100), and optimal starting XI / bench lineup recommendations.
 """
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
+from src.analysis.understat_fusion import UnderstatFusion
 from src.models.analysis import (
     FixtureDetails,
     PlayerScoreBreakdown,
@@ -17,16 +18,19 @@ from src.models.analysis import (
     SquadOptimization,
     ManagerSquadAnalysisReport,
 )
+from src.models.player import UnderstatStats
 
 
 class SquadAnalyzer:
     """Core intelligence engine for evaluating manager squads and player matchday projections."""
 
-    def __init__(self, fpl_client: Any):
+    def __init__(self, fpl_client: Any, understat_fusion: Optional[UnderstatFusion] = None):
         """
         :param fpl_client: An instance of FPLClient
+        :param understat_fusion: Optional UnderstatFusion instance
         """
         self.client = fpl_client
+        self.fusion = understat_fusion
 
     def get_upcoming_gameweek(self, bootstrap_data: Dict[str, Any]) -> Tuple[int, Optional[str]]:
         """
@@ -109,10 +113,12 @@ class SquadAnalyzer:
     def calculate_player_score(
         self, 
         player_dict: Dict[str, Any], 
-        fixtures: List[FixtureDetails]
+        fixtures: List[FixtureDetails],
+        understat_stats: Optional[UnderstatStats] = None
     ) -> PlayerScoreBreakdown:
         """
         Calculate Expected Points (xP) and 0-100 Score for a player in the target Gameweek.
+        Blends official FPL stats with Understat npxG90/xGChain90 metrics when available.
         """
         # 1. Base Form and PPG Metrics
         form_val = float(player_dict.get("form", 0.0) or 0.0)
@@ -129,21 +135,31 @@ class SquadAnalyzer:
 
         # Position-specific underlying stats contribution
         if elem_type in [1, 2]:  # GKP / DEF
-            # Clean sheet / defensive output proxy
             threat_component = form_component * 0.9 + (xg_val * 1.5 + xa_val * 1.0)
         else:  # MID / FWD
-            # Attacking threat output proxy
             threat_component = form_component * 0.8 + (xg_val * 2.0 + xa_val * 1.5 + xgi_val * 0.5)
+
+        # 2. Incorporate Understat Deep Metrics if present
+        understat_comp = 0.0
+        if understat_stats and understat_stats.minutes >= 90:
+            if elem_type in [1, 2]:  # GKP / DEF
+                understat_comp = (understat_stats.xGBuildup90 * 1.5 + understat_stats.xA90 * 1.2 + understat_stats.npxG90 * 1.0)
+            else:  # MID / FWD
+                understat_comp = (understat_stats.npxG90 * 2.2 + understat_stats.xA90 * 1.8 + understat_stats.xGChain90 * 0.8)
+            
+            if understat_comp > 0:
+                # Blend 70% FPL base + 30% Understat underlying quality
+                threat_component = (threat_component * 0.70) + (understat_comp * 0.30)
 
         baseline_raw = (form_component * 0.45) + (threat_component * 0.55)
 
-        # 2. Fixture Multiplier & Home/Away advantage calculation
+        # 3. Fixture Multiplier & Home/Away advantage calculation
         if not fixtures or fixtures[0].is_blank:
-            # Blank gameweek: 0 expected points
             return PlayerScoreBreakdown(
                 base_form=form_val,
                 form_component=round(form_component, 2),
                 xg_xa_component=round(threat_component, 2),
+                understat_component=round(understat_comp, 2),
                 fixture_multiplier=0.0,
                 home_away_multiplier=0.0,
                 availability_rate=0.0,
@@ -159,7 +175,7 @@ class SquadAnalyzer:
         home_mult_sum = 0.0
         tags: List[str] = []
 
-        # 3. Availability and Injury Penalty
+        # 4. Availability and Injury Penalty
         raw_status = player_dict.get("status", "a")
         chance = player_dict.get("chance_of_playing_next_round")
         
@@ -181,7 +197,6 @@ class SquadAnalyzer:
             fdr_mult_sum += fdr_mult
             home_mult_sum += home_mult
 
-            # Fixture tags
             loc_str = "H" if fix.is_home else "A"
             if fix.difficulty <= 2:
                 tags.append(f"Easy Fixture: vs {fix.opponent_short_name} ({loc_str})")
@@ -202,11 +217,16 @@ class SquadAnalyzer:
         if xg_val >= 2.0 or xgi_val >= 3.0:
             tags.append("High Goal Threat ⚡")
 
+        if understat_stats:
+            if understat_stats.xg_delta <= -1.5:
+                tags.append("Due Goals (Understat xG Unlucky) 🎯")
+            elif understat_stats.xGChain90 >= 0.8:
+                tags.append("Elite xGChain Involvement 🔗")
+
         # Cap and format Expected Points (xP)
         final_xp = round(max(0.0, total_xp), 2)
         
         # Composite score scaled to 0 - 100
-        # Normal high-tier xP for a single GW is ~8.5 to 10.0 pts (Haaland / Salah in prime)
         composite_score = round(min(100.0, (final_xp / 10.5) * 100.0), 1)
 
         if final_xp >= 6.5 and avail_rate >= 0.75:
@@ -216,79 +236,14 @@ class SquadAnalyzer:
             base_form=form_val,
             form_component=round(form_component, 2),
             xg_xa_component=round(threat_component, 2),
+            understat_component=round(understat_comp, 2),
             fixture_multiplier=avg_fdr_mult,
             home_away_multiplier=avg_home_mult,
             availability_rate=avail_rate,
             expected_points=final_xp,
             composite_score=composite_score,
-            tags=list(dict.fromkeys(tags))  # unique tags
+            tags=list(dict.fromkeys(tags))
         )
-
-    def optimize_squad(self, analyzed_players: List[PlayerAnalysis]) -> SquadOptimization:
-        """
-        Determine the mathematically optimal Starting XI (1 GKP + 10 Outfield conforming to valid
-        FPL formations: min 3 DEF, min 2 MID, min 1 FWD), best Bench order (Subs 1-4), and Captaincy.
-        """
-        # Group players by element_type / position
-        gkps = [p for p in analyzed_players if p.element_type == 1]
-        defs = [p for p in analyzed_players if p.element_type == 2]
-        mids = [p for p in analyzed_players if p.element_type == 3]
-        fwds = [p for p in analyzed_players if p.element_type == 4]
-
-        # Sort each positional pool by expected points descending
-        gkps.sort(key=lambda x: x.score_breakdown.expected_points, reverse=True)
-        defs.sort(key=lambda x: x.score_breakdown.expected_points, reverse=True)
-        mids.sort(key=lambda x: x.score_breakdown.expected_points, reverse=True)
-        fwds.sort(key=lambda x: x.score_breakdown.expected_points, reverse=True)
-
-        best_gkp = gkps[0] if gkps else analyzed_players[0]
-        backup_gkp = gkps[1] if len(gkps) > 1 else None
-
-        # Valid FPL Outfield Formations (DEF, MID, FWD summing to 10):
-        # DEF in [3, 4, 5], MID in [2, 3, 4, 5], FWD in [1, 2, 3]
-        valid_formations = [
-            (3, 5, 2), (3, 4, 3), (4, 4, 2), (4, 3, 3),
-            (4, 5, 1), (5, 3, 2), (5, 4, 1), (5, 2, 3)
-        ]
-
-        best_formation_str = "3-4-3"
-        best_starters: List[PlayerAnalysis] = []
-        max_total_xp = -1.0
-
-        for n_def, n_mid, n_fwd in valid_formations:
-            if len(defs) >= n_def and len(mids) >= n_mid and len(fwds) >= n_fwd:
-                selected = [best_gkp] + defs[:n_def] + mids[:n_mid] + fwds[:n_fwd]
-                total_xp = sum(p.score_breakdown.expected_points for p in selected)
-                if total_xp > max_total_xp:
-                    max_total_xp = total_xp
-                    best_formation_str = f"{n_def}-{n_mid}-{n_fwd}"
-                    best_starters = selected
-
-        # If fallback needed
-        if not best_starters:
-            best_starters = analyzed_players[:11]
-
-        # Remaining outfield players go to bench
-        bench_outfield = [p for p in analyzed_players if p not in best_starters and p != backup_gkp]
-        # Sort bench outfield in descending order of expected points (Sub 1, Sub 2, Sub 3)
-        bench_outfield.sort(key=lambda x: x.score_breakdown.expected_points, reverse=True)
-
-        # Full bench: Sub 1, Sub 2, Sub 3 + Backup GKP
-        best_bench: List[PlayerAnalysis] = bench_outfield.copy()
-        if backup_gkp:
-            best_bench.append(backup_gkp)
-
-        # Mark recommended roles
-        for p in best_starters:
-            p.is_recommended_starter = True
-            p.recommended_role = "Starting XI"
-
-        for idx, p in enumerate(best_bench):
-            p.is_recommended_starter = False
-            if p.element_type == 1:
-                p.recommended_role = "Bench GK"
-            else:
-                p.recommended_role = f"Sub {idx + 1}"
 
     def generate_captain_hierarchy(self, starting_xi: List[PlayerAnalysis]) -> List[CaptainChoice]:
         """
@@ -359,12 +314,9 @@ class SquadAnalyzer:
     ) -> List[TransferRecommendation]:
         """
         Generate metric-driven Transfer In / Transfer Out recommendations.
-        Identifies struggling / injured squad players and finds the highest xP replacements
-        in the Premier League within budget and club limits.
         """
         squad_element_ids = {p.element for p in analyzed_players}
         
-        # Calculate urgency score for Transfer OUT candidates
         def calculate_out_urgency(p: PlayerAnalysis) -> float:
             urgency = 0.0
             if p.status != "Available":
@@ -513,9 +465,7 @@ class SquadAnalyzer:
         bank_m: float = 0.0
     ) -> SquadOptimization:
         """
-        Determine optimal Starting XI (1 GKP + 10 Outfield conforming to valid FPL formations),
-        the strict Bench hierarchy (Sub 1-3 sorted by xP + Bench GK), Top 3 Captaincy Hierarchy,
-        and algorithmic Transfer In / Out recommendations.
+        Determine optimal Starting XI, strict Bench hierarchy, Captaincy, and single Transfer In/Out recs.
         """
         gkps = [p for p in analyzed_players if p.element_type == 1]
         defs = [p for p in analyzed_players if p.element_type == 2]
@@ -570,17 +520,16 @@ class SquadAnalyzer:
             else:
                 p.recommended_role = f"Sub {idx + 1}"
 
-        # Build Top 3 Captaincy Hierarchy
+        # Captaincy Hierarchy
         captain_hierarchy = self.generate_captain_hierarchy(best_starters)
         recommended_cap = captain_hierarchy[0].player
         recommended_vc = captain_hierarchy[1].player if len(captain_hierarchy) > 1 else recommended_cap
 
         recommended_cap.is_recommended_captain = True
         recommended_vc.is_recommended_vice_captain = True
-
         differential_cap = captain_hierarchy[2].player if len(captain_hierarchy) > 2 else None
 
-        # 1. Starting Lineup Promotions / Demotions
+        # Lineup Promotions / Demotions
         lineup_changes: List[str] = []
         for p in best_starters:
             if not p.is_current_starter:
@@ -595,7 +544,7 @@ class SquadAnalyzer:
                     f"🪑 DEMOTED to Bench: {p.web_name} ({p.team_short_name} - {p.position}) was in Starting XI (#{p.squad_position}) -> Benched (Projected: {p.score_breakdown.expected_points:.2f} xP, Status: {p.status})."
                 )
 
-        # 2. Bench Comparison & Tactical Sub Role Analysis
+        # Bench Comparison & Tactical Sub Roles
         bench_comparison: List[BenchComparisonItem] = []
         bench_adjustments: List[str] = []
         n_def_starters = len([p for p in best_starters if p.element_type == 2])
@@ -641,7 +590,7 @@ class SquadAnalyzer:
                 )
             )
 
-        # 3. Detect Outfield Sub Priority Mismatches
+        # Detect Outfield Sub Priority Mismatches
         outfield_bench_recommended = [p for p in best_bench if p.element_type != 1]
         outfield_bench_current = sorted(
             [p for p in analyzed_players if p.squad_position in [13, 14, 15]],
@@ -657,7 +606,6 @@ class SquadAnalyzer:
                         f"🔄 SUB ORDER SWAP: Move {rec_p.web_name} ({rec_p.score_breakdown.expected_points:.2f} xP) to Sub {rec_sub_num} (currently Sub {cur_p.squad_position - 12} has {cur_p.web_name} with {cur_p.score_breakdown.expected_points:.2f} xP)."
                     )
 
-        # Risk warnings
         warnings: List[str] = []
         for p in best_starters:
             if p.status != "Available":
@@ -670,7 +618,6 @@ class SquadAnalyzer:
             if best_bench[0].score_breakdown.expected_points > lowest_starter_xp:
                 warnings.append(f"💡 Bench Dilemma: Sub 1 '{best_bench[0].web_name}' ({best_bench[0].score_breakdown.expected_points} xP) is narrowly left out due to formation constraints.")
 
-        # Generate Transfer Recommendations if catalog provided
         transfer_recs = []
         if all_elements and teams_map and positions_map and fixtures:
             transfer_recs = self.generate_transfer_recommendations(
@@ -693,7 +640,6 @@ class SquadAnalyzer:
             risk_warnings=warnings
         )
 
-
     def analyze_manager_squad(
         self, 
         manager_id: int, 
@@ -701,13 +647,13 @@ class SquadAnalyzer:
         fpl_cookie: Optional[str] = None,
         transfers_in: Optional[List[int]] = None,
         transfers_out: Optional[List[int]] = None,
+        use_cache: bool = True
     ) -> ManagerSquadAnalysisReport:
         """
         Run full automated analysis on a manager's squad for the target Gameweek.
-        Supports pre-deadline saved transfers via authenticated cookie or explicit transfer overrides.
         """
         # 1. Fetch bootstrap data
-        bootstrap = self.client.get_bootstrap_static()
+        bootstrap = self.client.get_bootstrap_static(use_cache=use_cache)
         elements_map = {e["id"]: e for e in bootstrap.get("elements", [])}
         teams_map = {t["id"]: t for t in bootstrap.get("teams", [])}
         positions_map = {et["id"]: et for et in bootstrap.get("element_types", [])}
@@ -715,24 +661,24 @@ class SquadAnalyzer:
         # 2. Determine target Gameweek & Manager metadata
         upcoming_gw, deadline = self.get_upcoming_gameweek(bootstrap)
         
-        # Enforce that only upcoming/future Gameweeks (>= upcoming_gw) are analyzed
         if gw is not None:
-            if gw < upcoming_gw:
-                target_gw = upcoming_gw
-            else:
-                target_gw = min(gw, 38)
+            target_gw = upcoming_gw if gw < upcoming_gw else min(gw, 38)
         else:
             target_gw = upcoming_gw
 
-        manager_profile = self.client.get_manager(manager_id)
+        manager_profile = self.client.get_manager(manager_id, use_cache=use_cache)
         manager_name = f"{manager_profile.get('player_first_name', '')} {manager_profile.get('player_last_name', '')}".strip()
         team_name = manager_profile.get("name", "")
 
         # 3. Fetch all fixtures for target GW
-        fixtures = self.client.get_fixtures(event_id=target_gw)
+        fixtures = self.client.get_fixtures(event_id=target_gw, use_cache=use_cache)
 
-        # 4. Fetch manager squad picks
-        # Strategy A: Check authenticated /my-team/ endpoint if cookie provided or in config
+        # 4. Understat mapping
+        understat_map: Dict[int, UnderstatStats] = {}
+        if self.fusion:
+            understat_map = self.fusion.build_fpl_understat_mapping(bootstrap.get("elements", []), teams_map)
+
+        # 5. Fetch manager squad picks
         picks = []
         bank_m = 0.0
 
@@ -743,7 +689,7 @@ class SquadAnalyzer:
 
         if cookie_to_use:
             try:
-                my_team_data = self.client.get_my_team(manager_id, cookie=cookie_to_use)
+                my_team_data = self.client.get_my_team(manager_id, cookie=cookie_to_use, use_cache=use_cache)
                 if isinstance(my_team_data, dict) and "picks" in my_team_data:
                     picks = my_team_data["picks"]
                     trans_info = my_team_data.get("transfers", {})
@@ -752,20 +698,19 @@ class SquadAnalyzer:
             except Exception:
                 picks = []
 
-        # Strategy B: Public API fallback (latest active gameweek squad)
         if not picks:
             current_event = manager_profile.get("current_event") or 1
             squad_gw = target_gw if target_gw <= current_event else current_event
             try:
-                picks_data = self.client.get_manager_picks(manager_id, squad_gw)
+                picks_data = self.client.get_manager_picks(manager_id, squad_gw, use_cache=use_cache)
             except Exception:
-                picks_data = self.client.get_manager_picks(manager_id, current_event)
+                picks_data = self.client.get_manager_picks(manager_id, current_event, use_cache=use_cache)
 
             picks = picks_data.get("picks", [])
             entry_hist = picks_data.get("entry_history", {})
             bank_m = round(float(entry_hist.get("bank", 0)) / 10.0, 1) if entry_hist else 0.0
 
-        # Strategy C: Apply manual transfer overrides if requested
+        # Handle manual transfer overrides
         if transfers_in and transfers_out:
             updated_picks = []
             out_queue = list(transfers_out)
@@ -789,7 +734,7 @@ class SquadAnalyzer:
                     updated_picks.append(pick)
             picks = updated_picks
 
-        # 5. Build and score each player
+        # 6. Build and score each player
         analyzed_players: List[PlayerAnalysis] = []
         for pick in picks:
             elem_id = pick.get("element")
@@ -803,11 +748,9 @@ class SquadAnalyzer:
             elem_type_id = elem.get("element_type", 1)
             pos_obj = positions_map.get(elem_type_id, {})
 
-            # Resolve fixture(s) for target GW
             player_fixtures = self.resolve_player_fixtures(team_id, target_gw, fixtures, teams_map)
-
-            # Calculate score & xP
-            score_breakdown = self.calculate_player_score(elem, player_fixtures)
+            u_stats = understat_map.get(elem_id)
+            score_breakdown = self.calculate_player_score(elem, player_fixtures, understat_stats=u_stats)
 
             raw_status = elem.get("status", "a")
             chance = elem.get("chance_of_playing_next_round")
@@ -838,11 +781,12 @@ class SquadAnalyzer:
                 is_current_captain=is_cap,
                 is_current_vice_captain=is_vc,
                 fixtures=player_fixtures,
-                score_breakdown=score_breakdown
+                score_breakdown=score_breakdown,
+                understat=u_stats
             )
             analyzed_players.append(player_analysis)
 
-        # 6. Optimize Lineup, Bench, Captaincy & Transfers
+        # 7. Optimize Lineup, Bench, Captaincy & Transfers
         optimization = self.optimize_squad(
             analyzed_players=analyzed_players,
             all_elements=bootstrap.get("elements", []),
@@ -863,6 +807,63 @@ class SquadAnalyzer:
             optimization=optimization
         )
 
+    def analyze_manager_horizon(
+        self,
+        manager_id: int,
+        horizon_length: int = 5,
+        start_gw: Optional[int] = None,
+        fpl_cookie: Optional[str] = None,
+        use_cache: bool = True
+    ):
+        """Delegate to MultiGWAnalyzer."""
+        from src.analysis.multi_gw_analyzer import MultiGWAnalyzer
+        analyzer = MultiGWAnalyzer(self.client, understat_fusion=self.fusion)
+        return analyzer.analyze_manager_horizon(
+            manager_id=manager_id,
+            horizon_length=horizon_length,
+            start_gw=start_gw,
+            fpl_cookie=fpl_cookie,
+            use_cache=use_cache
+        )
+
+    def optimize_transfers(
+        self,
+        manager_id: int,
+        target_gw: Optional[int] = None,
+        horizon_length: int = 4,
+        free_transfers: int = 1,
+        fpl_cookie: Optional[str] = None,
+        use_cache: bool = True
+    ):
+        """Delegate to TransferOptimizer."""
+        from src.analysis.transfer_optimizer import TransferOptimizer
+        opt = TransferOptimizer(self.client, understat_fusion=self.fusion)
+        return opt.optimize_transfers(
+            manager_id=manager_id,
+            target_gw=target_gw,
+            horizon_length=horizon_length,
+            free_transfers=free_transfers,
+            fpl_cookie=fpl_cookie,
+            use_cache=use_cache
+        )
+
+    def evaluate_chips(
+        self,
+        manager_id: int,
+        target_gw: Optional[int] = None,
+        fpl_cookie: Optional[str] = None,
+        use_cache: bool = True
+    ):
+        """Delegate to ChipOptimizer."""
+        from src.analysis.chip_optimizer import ChipOptimizer
+        opt = ChipOptimizer(self.client)
+        return opt.evaluate_chips(
+            manager_id=manager_id,
+            target_gw=target_gw,
+            fpl_cookie=fpl_cookie,
+            use_cache=use_cache
+        )
+
     def get_squad_analysis_df(
         self, 
         manager_id: int, 
@@ -870,6 +871,7 @@ class SquadAnalyzer:
         fpl_cookie: Optional[str] = None,
         transfers_in: Optional[List[int]] = None,
         transfers_out: Optional[List[int]] = None,
+        use_cache: bool = True
     ) -> pd.DataFrame:
         """
         Export squad analysis as a clean, tabular Pandas DataFrame.
@@ -879,7 +881,8 @@ class SquadAnalyzer:
             gw=gw, 
             fpl_cookie=fpl_cookie, 
             transfers_in=transfers_in, 
-            transfers_out=transfers_out
+            transfers_out=transfers_out,
+            use_cache=use_cache
         )
         rows = []
 
@@ -908,6 +911,5 @@ class SquadAnalyzer:
             })
 
         df = pd.DataFrame(rows)
-        # Sort by xP descending
         df = df.sort_values(by="xP", ascending=False)
         return df

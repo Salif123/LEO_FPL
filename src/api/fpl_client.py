@@ -1,29 +1,32 @@
 """
-Comprehensive Official FPL API Client.
+Comprehensive Official FPL API Client with integrated TTL caching.
 Provides access to all core endpoints: static data, player stats (xG/xA/xGI),
-fixtures, live gameweek stats, and manager squad/history loading.
+fixtures, live gameweek stats, manager squad/history loading, multi-GW horizon projections,
+combinatorial transfers, and chip strategy planning.
 """
 from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from src.api.base_client import BaseClient
+from src.cache.cache_manager import CacheManager, get_cache
 from src.config import FPLConfig
 from src.models.manager import ManagerTeamListing, ManagerTeamPlayer, EntryHistory
 
 
 class FPLClient:
-    """Client for the Official Fantasy Premier League API."""
+    """Client for the Official Fantasy Premier League API with caching."""
 
-    def __init__(self, client: Optional[BaseClient] = None):
+    def __init__(self, client: Optional[BaseClient] = None, cache: Optional[CacheManager] = None):
         self.client = client or BaseClient(
             user_agent=FPLConfig.USER_AGENT, 
             timeout=FPLConfig.DEFAULT_TIMEOUT_SECONDS
         )
+        self.cache = cache if cache is not None else get_cache()
 
     # -------------------------------------------------------------------------
     # 1. Core / Bootstrap Data (Players, Teams, Gameweeks, Positions)
     # -------------------------------------------------------------------------
-    def get_bootstrap_static(self) -> Dict[str, Any]:
+    def get_bootstrap_static(self, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch the primary bootstrap static data containing:
         - 'elements': List of all 600+ players with full stats (xG, xA, price, form, etc.)
@@ -31,14 +34,22 @@ class FPLClient:
         - 'events': List of 38 Gameweeks with deadlines & status
         - 'element_types': Positional categories (GKP=1, DEF=2, MID=3, FWD=4)
         """
-        return self.client.get(FPLConfig.BOOTSTRAP_STATIC_URL)
+        if use_cache and not force_refresh:
+            cached = self.cache.get("bootstrap_static")
+            if cached:
+                return cached
 
-    def get_players_df(self) -> pd.DataFrame:
+        data = self.client.get(FPLConfig.BOOTSTRAP_STATIC_URL)
+        if use_cache and data:
+            self.cache.set("bootstrap_static", data)
+        return data
+
+    def get_players_df(self, use_cache: bool = True, force_refresh: bool = False) -> pd.DataFrame:
         """
         Helper method returning a Pandas DataFrame of all players with
         convenient column conversions (now_cost in millions, numeric xG/xA/xGI).
         """
-        data = self.get_bootstrap_static()
+        data = self.get_bootstrap_static(use_cache=use_cache, force_refresh=force_refresh)
         players = data.get("elements", [])
         teams = {t["id"]: t["name"] for t in data.get("teams", [])}
         positions = {et["id"]: et["singular_name_short"] for et in data.get("element_types", [])}
@@ -69,42 +80,68 @@ class FPLClient:
     # -------------------------------------------------------------------------
     # 2. Individual Player Deep-Dive
     # -------------------------------------------------------------------------
-    def get_element_summary(self, player_id: int) -> Dict[str, Any]:
+    def get_element_summary(self, player_id: int, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch detailed statistics for a specific player:
         - 'history': Match-by-match breakdown for the current season (xG, xA, minutes, points, opponent)
         - 'fixtures': Upcoming matches with FDR (Fixture Difficulty Rating)
         - 'history_past': Season totals for previous campaigns
         """
+        if use_cache and not force_refresh:
+            cached = self.cache.get("element_summary", identifier=player_id)
+            if cached:
+                return cached
+
         url = FPLConfig.ELEMENT_SUMMARY_URL.format(player_id=player_id)
-        return self.client.get(url)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("element_summary", data, identifier=player_id)
+        return data
 
     # -------------------------------------------------------------------------
     # 3. Fixtures
     # -------------------------------------------------------------------------
-    def get_fixtures(self, event_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_fixtures(self, event_id: Optional[int] = None, use_cache: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Fetch Premier League fixtures.
         :param event_id: Optional Gameweek number (1-38). If omitted, returns all 380 fixtures.
         """
         params = {"event": event_id} if event_id is not None else None
-        return self.client.get(FPLConfig.FIXTURES_URL, params=params)
+        cache_id = event_id if event_id is not None else "all"
+
+        if use_cache and not force_refresh:
+            cached = self.cache.get("fixtures", identifier=cache_id, params=params)
+            if cached:
+                return cached
+
+        data = self.client.get(FPLConfig.FIXTURES_URL, params=params)
+        if use_cache and data:
+            self.cache.set("fixtures", data, identifier=cache_id, params=params)
+        return data
 
     # -------------------------------------------------------------------------
     # 4. Live Gameweek Matchday Data
     # -------------------------------------------------------------------------
-    def get_event_live(self, event_id: int) -> Dict[str, Any]:
+    def get_event_live(self, event_id: int, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch real-time live match statistics for a specific Gameweek.
         Returns live player points, goals, assists, saves, bonus points, BPS, and live xG.
         """
+        if use_cache and not force_refresh:
+            cached = self.cache.get("event_live", identifier=event_id)
+            if cached:
+                return cached
+
         url = FPLConfig.EVENT_LIVE_URL.format(event_id=event_id)
-        return self.client.get(url)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("event_live", data, identifier=event_id)
+        return data
 
     # -------------------------------------------------------------------------
     # 5. Manager & Team Loading
     # -------------------------------------------------------------------------
-    def get_manager(self, manager_id: int) -> Dict[str, Any]:
+    def get_manager(self, manager_id: int, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch high-level manager profile:
         - Manager Name & Team Name
@@ -113,84 +150,140 @@ class FPLClient:
         - Region / country
         - Active leagues
         """
-        url = FPLConfig.MANAGER_ENTRY_URL.format(manager_id=manager_id)
-        return self.client.get(url)
+        if use_cache and not force_refresh:
+            cached = self.cache.get("manager_entry", identifier=manager_id)
+            if cached:
+                return cached
 
-    def get_manager_picks(self, manager_id: int, event_id: int) -> Dict[str, Any]:
+        url = FPLConfig.MANAGER_ENTRY_URL.format(manager_id=manager_id)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("manager_entry", data, identifier=manager_id)
+        return data
+
+    def get_manager_picks(self, manager_id: int, event_id: int, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch manager's exact squad selection for a given Gameweek:
         - 'picks': 15 players (1-11 starting XI, 12-15 bench) with 'is_captain', 'multiplier'
         - 'active_chip': Active chip for this GW ('wildcard', 'freehit', 'bboost', '3xc', or None)
         - 'entry_history': GW points, GW rank, squad value, bank, transfers made, transfer cost
         """
-        url = FPLConfig.MANAGER_PICKS_URL.format(manager_id=manager_id, event_id=event_id)
-        return self.client.get(url)
+        if use_cache and not force_refresh:
+            cached = self.cache.get("manager_picks", identifier=f"{manager_id}_gw{event_id}")
+            if cached:
+                return cached
 
-    def get_manager_history(self, manager_id: int) -> Dict[str, Any]:
+        url = FPLConfig.MANAGER_PICKS_URL.format(manager_id=manager_id, event_id=event_id)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("manager_picks", data, identifier=f"{manager_id}_gw{event_id}")
+        return data
+
+    def get_manager_history(self, manager_id: int, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch manager's performance history:
         - 'current': GW-by-GW breakdown across the season (rank, points, transfers, chips)
         - 'past': Final points and overall ranks from previous years
         - 'chips': List of chips used and which GW they were activated
         """
-        url = FPLConfig.MANAGER_HISTORY_URL.format(manager_id=manager_id)
-        return self.client.get(url)
+        if use_cache and not force_refresh:
+            cached = self.cache.get("manager_history", identifier=manager_id)
+            if cached:
+                return cached
 
-    def get_manager_transfers(self, manager_id: int) -> List[Dict[str, Any]]:
+        url = FPLConfig.MANAGER_HISTORY_URL.format(manager_id=manager_id)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("manager_history", data, identifier=manager_id)
+        return data
+
+    def get_manager_transfers(self, manager_id: int, use_cache: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Fetch complete log of all transfers made by the manager (element_in, element_out, event, time).
         """
-        url = FPLConfig.MANAGER_TRANSFERS_URL.format(manager_id=manager_id)
-        return self.client.get(url)
+        if use_cache and not force_refresh:
+            cached = self.cache.get("manager_transfers", identifier=manager_id)
+            if cached:
+                return cached
 
-    def get_my_team(self, manager_id: int, cookie: Optional[str] = None) -> Dict[str, Any]:
+        url = FPLConfig.MANAGER_TRANSFERS_URL.format(manager_id=manager_id)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("manager_transfers", data, identifier=manager_id)
+        return data
+
+    def get_my_team(self, manager_id: int, cookie: Optional[str] = None, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch manager's private pre-deadline squad picks and active transfers for upcoming GW.
         Requires an authenticated FPL session cookie (`pl_profile`).
         """
+        if use_cache and not force_refresh:
+            cached = self.cache.get("my_team", identifier=manager_id)
+            if cached:
+                return cached
+
         url = FPLConfig.MY_TEAM_URL.format(manager_id=manager_id)
         fpl_cookie = cookie or FPLConfig.FPL_COOKIE
         headers = {}
         if fpl_cookie:
             c_str = fpl_cookie if ("=" in fpl_cookie) else f"pl_profile={fpl_cookie}"
             headers["Cookie"] = c_str
-        return self.client.get(url, headers=headers if headers else None)
+            
+        data = self.client.get(url, headers=headers if headers else None)
+        if use_cache and data:
+            self.cache.set("my_team", data, identifier=manager_id)
+        return data
 
     def get_manager_team(
         self, 
         manager_id: int, 
         event_id: Optional[int] = None, 
-        return_model: bool = False
+        return_model: bool = False,
+        use_cache: bool = True,
+        force_refresh: bool = False
     ) -> Any:
         """
         Fetch the complete team listing for a manager in a given Gameweek, enriched with full player stats.
-
-        Merges manager squad picks with bootstrap static player, team, and position data.
-        Returns detailed player data for both Starting XI and Bench:
-        - Player web names, full names, clubs (e.g. Arsenal, Man City)
-        - Positional types (GKP, DEF, MID, FWD) and squad order (1-15)
-        - Captain (2x/3x) & Vice-Captain indicators
-        - Pricing (£m), total points, form, expected goals (xG), expected assists (xA)
-        - Squad value, bank balance, active chips, transfers cost
-
-        :param manager_id: FPL Manager Entry ID (e.g. 1)
-        :param event_id: Optional Gameweek number (1-38). If None, defaults to manager's current active Gameweek.
-        :param return_model: If True, returns a Pydantic ManagerTeamListing instance; else returns a detailed Dict.
+        Gracefully handles future/pre-deadline gameweeks by projecting from latest confirmed squad.
         """
         # 1. Fetch Manager Profile to resolve current event and metadata
-        manager_data = self.get_manager(manager_id)
-        target_gw = event_id or manager_data.get("current_event") or 1
+        manager_data = self.get_manager(manager_id, use_cache=use_cache, force_refresh=force_refresh)
+        current_event = manager_data.get("current_event") or 1
+        target_gw = event_id or current_event
         manager_name = f"{manager_data.get('player_first_name', '')} {manager_data.get('player_last_name', '')}".strip()
         team_name = manager_data.get("name", "")
 
-        # 2. Fetch Squad Picks for target GW
-        picks_data = self.get_manager_picks(manager_id, target_gw)
-        picks = picks_data.get("picks", [])
-        active_chip = picks_data.get("active_chip")
-        entry_hist = picks_data.get("entry_history", {})
+        # 2. Fetch Squad Picks (Strategy A: Cookie /my-team/, Strategy B: /picks/ for requested GW or fallback to current_event)
+        picks = []
+        entry_hist = {}
+        active_chip = None
+
+        from src.config import FPLConfig
+        cookie_to_use = FPLConfig.FPL_COOKIE
+        if cookie_to_use:
+            try:
+                my_team_data = self.get_my_team(manager_id, cookie=cookie_to_use, use_cache=use_cache)
+                if isinstance(my_team_data, dict) and "picks" in my_team_data:
+                    picks = my_team_data["picks"]
+                    trans_info = my_team_data.get("transfers", {})
+                    bank_raw = trans_info.get("bank", 0)
+                    entry_hist = {"bank": bank_raw, "value": trans_info.get("value", 0)}
+            except Exception:
+                picks = []
+
+        if not picks:
+            squad_gw = target_gw if target_gw <= current_event else current_event
+            try:
+                picks_data = self.get_manager_picks(manager_id, squad_gw, use_cache=use_cache, force_refresh=force_refresh)
+            except Exception:
+                picks_data = self.get_manager_picks(manager_id, current_event, use_cache=use_cache, force_refresh=force_refresh)
+
+            picks = picks_data.get("picks", [])
+            active_chip = picks_data.get("active_chip")
+            entry_hist = picks_data.get("entry_history", {})
 
         # 3. Fetch Bootstrap Static to resolve player, club, position names & stats
-        bootstrap = self.get_bootstrap_static()
+        bootstrap = self.get_bootstrap_static(use_cache=use_cache, force_refresh=force_refresh)
         elements_map = {e["id"]: e for e in bootstrap.get("elements", [])}
         teams_map = {t["id"]: t for t in bootstrap.get("teams", [])}
         positions_map = {et["id"]: et for et in bootstrap.get("element_types", [])}
@@ -289,13 +382,11 @@ class FPLClient:
 
         return result_dict
 
-    def get_manager_team_df(self, manager_id: int, event_id: Optional[int] = None) -> pd.DataFrame:
+    def get_manager_team_df(self, manager_id: int, event_id: Optional[int] = None, use_cache: bool = True) -> pd.DataFrame:
         """
         Fetch manager squad as a clean, tabular Pandas DataFrame.
-        Includes squad position, role (Starter / Bench), player name, club, position,
-        cost, captain status, points, form, xG, and xA.
         """
-        team_data = self.get_manager_team(manager_id, event_id, return_model=False)
+        team_data = self.get_manager_team(manager_id, event_id, return_model=False, use_cache=use_cache)
         players = team_data.get("players", [])
 
         rows = []
@@ -325,16 +416,23 @@ class FPLClient:
         df = pd.DataFrame(rows)
         return df
 
-
     # -------------------------------------------------------------------------
     # 6. Mini-Leagues
     # -------------------------------------------------------------------------
-    def get_classic_league(self, league_id: int) -> Dict[str, Any]:
+    def get_classic_league(self, league_id: int, use_cache: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch classic mini-league standings and manager points.
         """
+        if use_cache and not force_refresh:
+            cached = self.cache.get("classic_league", identifier=league_id)
+            if cached:
+                return cached
+
         url = FPLConfig.CLASSIC_LEAGUE_URL.format(league_id=league_id)
-        return self.client.get(url)
+        data = self.client.get(url)
+        if use_cache and data:
+            self.cache.set("classic_league", data, identifier=league_id)
+        return data
 
     # -------------------------------------------------------------------------
     # 7. Squad Analysis & Predictive Scoring
@@ -346,17 +444,10 @@ class FPLClient:
         fpl_cookie: Optional[str] = None,
         transfers_in: Optional[List[int]] = None,
         transfers_out: Optional[List[int]] = None,
+        use_cache: bool = True
     ):
         """
         Run complete predictive scoring and optimization analysis on a manager's squad.
-        Returns a ManagerSquadAnalysisReport with starting XI optimization, captain recommendations,
-        and fixture difficulty analysis.
-        
-        :param manager_id: FPL Manager Entry ID
-        :param gw: Target Gameweek (defaults to upcoming gameweek)
-        :param fpl_cookie: Optional FPL session cookie to fetch pre-deadline saved transfers from /my-team/
-        :param transfers_in: Optional list of player IDs to simulate adding to the squad
-        :param transfers_out: Optional list of player IDs to simulate removing from the squad
         """
         from src.analysis.squad_analyzer import SquadAnalyzer
         analyzer = SquadAnalyzer(self)
@@ -365,7 +456,8 @@ class FPLClient:
             gw=gw, 
             fpl_cookie=fpl_cookie, 
             transfers_in=transfers_in, 
-            transfers_out=transfers_out
+            transfers_out=transfers_out,
+            use_cache=use_cache
         )
 
     def get_squad_analysis_df(
@@ -375,6 +467,7 @@ class FPLClient:
         fpl_cookie: Optional[str] = None,
         transfers_in: Optional[List[int]] = None,
         transfers_out: Optional[List[int]] = None,
+        use_cache: bool = True
     ) -> pd.DataFrame:
         """
         Export manager squad analysis and score breakdown as a sorted Pandas DataFrame.
@@ -386,10 +479,92 @@ class FPLClient:
             gw=gw, 
             fpl_cookie=fpl_cookie, 
             transfers_in=transfers_in, 
-            transfers_out=transfers_out
+            transfers_out=transfers_out,
+            use_cache=use_cache
+        )
+
+    def analyze_manager_horizon(
+        self,
+        manager_id: int,
+        horizon_length: int = 5,
+        start_gw: Optional[int] = None,
+        fpl_cookie: Optional[str] = None,
+        use_cache: bool = True
+    ):
+        """
+        Run Multi-Gameweek Horizon analysis (e.g. Next 5 Gameweeks) for a manager.
+        """
+        from src.analysis.multi_gw_analyzer import MultiGWAnalyzer
+        analyzer = MultiGWAnalyzer(self)
+        return analyzer.analyze_manager_horizon(
+            manager_id=manager_id,
+            horizon_length=horizon_length,
+            start_gw=start_gw,
+            fpl_cookie=fpl_cookie,
+            use_cache=use_cache
+        )
+
+    def optimize_transfers(
+        self,
+        manager_id: int,
+        target_gw: Optional[int] = None,
+        horizon_length: int = 4,
+        free_transfers: int = 1,
+        fpl_cookie: Optional[str] = None,
+        use_cache: bool = True
+    ):
+        """
+        Run Combinatorial Multi-Transfer optimization (1, 2, or 3 player swaps).
+        """
+        from src.analysis.transfer_optimizer import TransferOptimizer
+        opt = TransferOptimizer(self)
+        return opt.optimize_transfers(
+            manager_id=manager_id,
+            target_gw=target_gw,
+            horizon_length=horizon_length,
+            free_transfers=free_transfers,
+            fpl_cookie=fpl_cookie,
+            use_cache=use_cache
+        )
+
+    def evaluate_chips(
+        self,
+        manager_id: int,
+        target_gw: Optional[int] = None,
+        fpl_cookie: Optional[str] = None,
+        use_cache: bool = True
+    ):
+        """
+        Run Seasonal Chip Strategy and optimal execution calendar planning.
+        """
+        from src.analysis.chip_optimizer import ChipOptimizer
+        opt = ChipOptimizer(self)
+        return opt.evaluate_chips(
+            manager_id=manager_id,
+            target_gw=target_gw,
+            fpl_cookie=fpl_cookie,
+            use_cache=use_cache
+        )
+
+    def analyze_mini_league(
+        self,
+        league_id: int,
+        target_manager_id: Optional[int] = None,
+        gw: Optional[int] = None,
+        use_cache: bool = True
+    ):
+        """
+        Run Mini-League analysis, Effective Ownership (EO), and rival squad overlap comparisons.
+        """
+        from src.analysis.league_analyzer import LeagueAnalyzer
+        analyzer = LeagueAnalyzer(self)
+        return analyzer.analyze_mini_league(
+            league_id=league_id,
+            target_manager_id=target_manager_id,
+            gw=gw,
+            use_cache=use_cache
         )
 
     def close(self):
         """Close the underlying HTTP session."""
         self.client.close()
-
