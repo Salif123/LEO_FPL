@@ -301,6 +301,7 @@ class FPLClient:
             team_id = elem.get("team", 0)
             team_obj = teams_map.get(team_id, {})
             elem_type_id = elem.get("element_type", 0)
+            pos_obj = positions_map.get(elem_type_id, {})
             raw_status = elem.get("status", "a")
             status_map = {
                 "a": "Available",

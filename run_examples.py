@@ -4,6 +4,9 @@ Run this script to test all endpoints:
     python run_examples.py
 """
 import json
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 from src.api.fpl_client import FPLClient
 from src.api.understat_client import UnderstatClient
 
