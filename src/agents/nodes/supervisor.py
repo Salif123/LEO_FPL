@@ -33,7 +33,7 @@ def supervisor_node(state: FPLAgentState) -> Dict[str, Any]:
     """
     messages = state.get("messages", [])
     if not messages:
-        return {"next_node": "synthesis"}
+        return {"next_node": "jev_scorer"}
 
     last_message = messages[-1]
     user_query = last_message.content if isinstance(last_message, (HumanMessage, AIMessage)) else str(last_message)
@@ -104,12 +104,12 @@ def supervisor_node(state: FPLAgentState) -> Dict[str, Any]:
             "iteration_count": state.get("iteration_count", 0) + 1
         }
     
-    # All tasks done -> synthesize final answer
+    # All tasks done -> route through Jev Decision Scorer -> synthesis
     return {
         "manager_id": manager_id,
         "league_id": league_id,
         "required_tasks": required,
         "completed_tasks": completed,
-        "next_node": "synthesis",
+        "next_node": "jev_scorer",
         "iteration_count": state.get("iteration_count", 0) + 1
     }

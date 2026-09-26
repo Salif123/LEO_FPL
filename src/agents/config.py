@@ -2,6 +2,7 @@
 LLM Configuration, Detection, and Provider Factory for FPL Agentic Engine.
 Supports Groq, Google Gemini, OpenAI, and Anthropic.
 """
+from traceback import print_exception
 import os
 from typing import Any, Dict, Optional
 from dotenv import load_dotenv
@@ -26,6 +27,16 @@ class AgentConfig:
     GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    if OPENROUTER_API_KEY:
+        print("✅ OPENROUTER_API_KEY loaded successfully!")
+    else:
+        print("❌ OPENROUTER_API_KEY not found!")
+    JEV_MODEL = os.getenv("JEV_MODEL", "typesafe/jev")
+    if JEV_MODEL:
+        print("Jev model loaded successfully!")
+    else:
+        print("Jev model not found!")
 
 
 def detect_llm_provider() -> Dict[str, Any]:
@@ -143,4 +154,34 @@ def get_llm(
 
     raise ValueError(
         "No active LLM provider detected. Please add GROQ_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY to your .env file."
+    )
+
+
+def get_jev_client(
+    model: Optional[str] = None,
+    timeout: float = 2.0
+) -> BaseChatModel:
+    """
+    Factory function returning a configured ChatOpenAI client routed to OpenRouter for Jev.
+    
+    Args:
+        model: Model name (defaults to JEV_MODEL or 'typesafe/jev').
+        timeout: Request timeout in seconds.
+        
+    Returns:
+        ChatOpenAI instance pointed at OpenRouter.
+    """
+    from langchain_openai import ChatOpenAI
+    api_key = AgentConfig.OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("Missing OPENROUTER_API_KEY in environment or .env file.")
+
+    target_model = model or AgentConfig.JEV_MODEL or os.getenv("JEV_MODEL", "typesafe/jev")
+    return ChatOpenAI(
+        model=target_model,
+        openai_api_key=api_key,
+        openai_api_base="https://openrouter.ai/api/v1",
+        temperature=0.0,
+        max_tokens=300,
+        request_timeout=timeout,
     )

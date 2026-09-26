@@ -38,3 +38,7 @@ class FPLAgentState(TypedDict, total=False):
     completed_tasks: Optional[List[str]]
     iteration_count: int
     final_response: Optional[str]
+
+    # 6. TypeSafe Jev Fast Decision Context
+    jev_status: Optional[str]               # "online" | "unavailable" | "error"
+    jev_result: Optional[Dict[str, Any]]    # { verdict, hit_risk, urgency_score, confidence_pct, latency_ms }

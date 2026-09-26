@@ -28,11 +28,33 @@ Never invent stats or prices—rely solely on the provided specialist findings.
 
 def synthesis_node(state: FPLAgentState) -> Dict[str, Any]:
     """
-    Synthesizes findings from all worker nodes into a final tactical briefing.
+    Synthesizes findings from all worker nodes and Jev into a final tactical briefing.
     """
     messages = state.get("messages", [])
     user_query = messages[-1].content if messages else "Gameweek advice"
 
+    # 1. Format TypeSafe Jev Fast Decision Engine Block
+    jev_status = state.get("jev_status")
+    jev_result = state.get("jev_result")
+    
+    if jev_status == "online" and jev_result:
+        jev_block = (
+            f"## ⚡ TypeSafe Jev Fast Decision Engine\n"
+            f"- **Verdict**: {jev_result.get('verdict', 'N/A')}\n"
+            f"- **Hit Risk Assessment**: {jev_result.get('hit_risk', 'N/A')}\n"
+            f"- **Transfer Urgency**: {jev_result.get('urgency_score', 'N/A')}\n"
+            f"- **Recommendation Confidence**: {jev_result.get('confidence_pct', 'N/A')}%\n"
+            f"- **Key Metric**: {jev_result.get('key_metric', 'N/A')}\n"
+            f"- **Status**: 🟢 Online ({jev_result.get('latency_ms', 0):.0f}ms)"
+        )
+    else:
+        jev_block = (
+            f"## ⚡ TypeSafe Jev Fast Decision Engine\n"
+            f"> ⚠️ **Status: Not Available** (API offline or OPENROUTER_API_KEY missing)\n"
+            f"> *Fast non-autoregressive decision scoring could not be loaded.*"
+        )
+
+    # 2. Gather specialist findings
     findings_sections = []
     if state.get("scout_findings"):
         findings_sections.append(f"### 🔍 Scouting & Lineup Intelligence:\n{state['scout_findings']}")
@@ -50,25 +72,30 @@ def synthesis_node(state: FPLAgentState) -> Dict[str, Any]:
     prompt_content = (
         f"User Question: {user_query}\n\n"
         f"Specialist Analytical Findings:\n{aggregated_context}\n\n"
-        f"Please synthesize this into a clear, decisive FPL tactical recommendation for the user."
     )
+    if jev_result:
+        prompt_content += f"Jev Decision Vector: {jev_result}\n\n"
+    prompt_content += "Please synthesize this into a clear, decisive FPL tactical coaching recommendation for the user."
 
+    # 3. LLM Synthesis
     try:
         llm = get_llm()
         response = llm.invoke([
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=prompt_content)
         ])
-        final_text = response.content if hasattr(response, "content") else str(response)
+        llm_text = response.content if hasattr(response, "content") else str(response)
     except Exception as e:
         # Fallback to direct structured summary if LLM API key is not configured or offline
-        final_text = (
-            f"## 📋 FPL Tactical Briefing\n\n"
+        llm_text = (
+            f"### 📋 Specialist Analytical Report\n\n"
             f"{aggregated_context}\n\n"
             f"> [!NOTE]\n"
             f"> LLM Synthesis fallback active ({e}). Specialist algorithmic computations above are 100% accurate."
         )
 
+    # 4. Final Combined Dual-Engine Output
+    final_text = f"{jev_block}\n\n---\n\n## 🧠 Tactical Coach Advisory\n\n{llm_text}"
     ai_message = AIMessage(content=final_text)
     
     return {

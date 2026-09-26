@@ -7,6 +7,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from src.agents.nodes.chip_horizon_node import chip_horizon_node
+from src.agents.nodes.jev_scorer import jev_scorer_node
 from src.agents.nodes.lineup_node import lineup_node
 from src.agents.nodes.rival_node import rival_node
 from src.agents.nodes.scout_node import scout_node
@@ -21,9 +22,9 @@ def route_next_step(state: FPLAgentState) -> str:
     Conditional routing function evaluating state['next_node'].
     """
     next_node = state.get("next_node")
-    if next_node in ["lineup", "scout", "transfer", "chip", "horizon", "rival", "synthesis"]:
+    if next_node in ["lineup", "scout", "transfer", "chip", "horizon", "rival", "jev_scorer", "synthesis"]:
         return next_node
-    return "synthesis"
+    return "jev_scorer"
 
 
 def create_fpl_agent_graph(checkpointer: Any = None):
@@ -46,6 +47,7 @@ def create_fpl_agent_graph(checkpointer: Any = None):
     workflow.add_node("chip", chip_horizon_node)
     workflow.add_node("horizon", chip_horizon_node)
     workflow.add_node("rival", rival_node)
+    workflow.add_node("jev_scorer", jev_scorer_node)
     workflow.add_node("synthesis", synthesis_node)
 
     # 2. Add entrypoint
@@ -62,6 +64,7 @@ def create_fpl_agent_graph(checkpointer: Any = None):
             "chip": "chip",
             "horizon": "horizon",
             "rival": "rival",
+            "jev_scorer": "jev_scorer",
             "synthesis": "synthesis",
         }
     )
@@ -74,7 +77,10 @@ def create_fpl_agent_graph(checkpointer: Any = None):
     workflow.add_edge("horizon", "supervisor")
     workflow.add_edge("rival", "supervisor")
 
-    # 5. Synthesis completes the graph
+    # 5. Jev Decision Scorer routes to Synthesis
+    workflow.add_edge("jev_scorer", "synthesis")
+
+    # 6. Synthesis completes the graph
     workflow.add_edge("synthesis", END)
 
     memory = checkpointer if checkpointer is not None else MemorySaver()
