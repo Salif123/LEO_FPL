@@ -136,8 +136,8 @@ cp .env.example .env
 Set your API keys:
 ```env
 # Default Manager and Mini-League IDs
-DEFAULT_MANAGER_ID=1209336
-DEFAULT_LEAGUE_ID=314
+DEFAULT_MANAGER_ID=
+DEFAULT_LEAGUE_ID=
 
 # 1. System 1: TypeSafe Jev (via OpenRouter)
 OPENROUTER_API_KEY=sk-or-v1-your_openrouter_api_key_here
