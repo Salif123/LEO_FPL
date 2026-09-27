@@ -33,6 +33,7 @@ Thumbs.db
 # Data
 data/raw/
 data/processed/
+data/cache/
 
 # Python build
 dist/
