@@ -196,8 +196,8 @@ cp .env.example .env
 
 ```env
 # Default Manager & Mini-League IDs
-DEFAULT_MANAGER_ID=1209336
-DEFAULT_LEAGUE_ID=314
+DEFAULT_MANAGER_ID=
+DEFAULT_LEAGUE_ID=
 
 # Option 1: Groq (Ultra-Fast Free Tier - Recommended)
 GROQ_API_KEY=gsk_your_groq_api_key_here
