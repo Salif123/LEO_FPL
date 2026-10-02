@@ -1,1 +1,5 @@
-# Leo the PL Lion FPL Analyzer
+"""
+FPL Analyzer Package.
+"""
+
+__version__ = "1.0.0"
